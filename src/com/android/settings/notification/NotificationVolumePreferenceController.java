@@ -16,7 +16,6 @@
 
 package com.android.settings.notification;
 
-import android.app.ActivityThread;
 import android.app.INotificationManager;
 import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
@@ -24,13 +23,14 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.database.ContentObserver;
 import android.media.AudioManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.ServiceManager;
 import android.os.Vibrator;
-import android.provider.DeviceConfig;
+import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
 import android.text.TextUtils;
 import android.util.Log;
@@ -39,13 +39,11 @@ import androidx.lifecycle.OnLifecycleEvent;
 import androidx.preference.PreferenceScreen;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.config.sysui.SystemUiDeviceConfigFlags;
 import com.android.settings.R;
 import com.android.settings.Utils;
 import com.android.settingslib.core.lifecycle.Lifecycle;
 
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * Update notification volume icon in Settings in response to user adjusting volume.
@@ -54,7 +52,6 @@ public class NotificationVolumePreferenceController extends VolumeSeekBarPrefere
 
     private static final String TAG = "NotificationVolumePreferenceController";
     private static final String KEY_NOTIFICATION_VOLUME = "notification_volume";
-    private static final boolean CONFIG_DEFAULT_VAL = false;
     private boolean mSeparateNotification;
 
     private Vibrator mVibrator;
@@ -67,6 +64,21 @@ public class NotificationVolumePreferenceController extends VolumeSeekBarPrefere
     private final int mNormalIconId =  R.drawable.ic_notifications;
     private final int mVibrateIconId = R.drawable.ic_volume_ringer_vibrate;
     private final int mSilentIconId = R.drawable.ic_notifications_off_24dp;
+
+    private final ContentObserver mSettingObserver = new ContentObserver(
+            new Handler(Looper.getMainLooper())) {
+        @Override
+        public void onChange(boolean selfChange) {
+            boolean newVal = !isNotificationStreamLinked();
+            if (newVal != mSeparateNotification) {
+                mSeparateNotification = newVal;
+                // manually hiding the preference because being unavailable does not do the job
+                if (mPreference != null) {
+                    mPreference.setVisible(getAvailabilityStatus() == AVAILABLE);
+                }
+            }
+        }
+    };
 
     public NotificationVolumePreferenceController(Context context) {
         this(context, KEY_NOTIFICATION_VOLUME);
@@ -83,6 +95,11 @@ public class NotificationVolumePreferenceController extends VolumeSeekBarPrefere
         updateRingerMode();
     }
 
+    private boolean isNotificationStreamLinked() {
+        return Settings.Secure.getInt(mContext.getContentResolver(),
+                Settings.Secure.VOLUME_LINK_NOTIFICATION, 0) == 1;
+    }
+
     /**
      * Allow for notification slider to be enabled in the scenario where the config switches on
      * while settings page is already on the screen by always configuring the preference, even if it
@@ -94,8 +111,7 @@ public class NotificationVolumePreferenceController extends VolumeSeekBarPrefere
         if (mPreference == null) {
             setupVolPreference(screen);
         }
-        mSeparateNotification = DeviceConfig.getBoolean(DeviceConfig.NAMESPACE_SYSTEMUI,
-                SystemUiDeviceConfigFlags.VOLUME_SEPARATE_NOTIFICATION, CONFIG_DEFAULT_VAL);
+        mSeparateNotification = !isNotificationStreamLinked();
         if (mPreference != null) {
             mPreference.setVisible(getAvailabilityStatus() == AVAILABLE);
         }
@@ -103,34 +119,14 @@ public class NotificationVolumePreferenceController extends VolumeSeekBarPrefere
         updatePreferenceIconAndSliderState();
     }
 
-    /**
-     * Only display the notification slider when the corresponding device config flag is set
-     */
-    private void onDeviceConfigChange(DeviceConfig.Properties properties) {
-        Set<String> changeSet = properties.getKeyset();
-
-        if (changeSet.contains(SystemUiDeviceConfigFlags.VOLUME_SEPARATE_NOTIFICATION)) {
-            boolean newVal = properties.getBoolean(
-                    SystemUiDeviceConfigFlags.VOLUME_SEPARATE_NOTIFICATION, CONFIG_DEFAULT_VAL);
-            if (newVal != mSeparateNotification) {
-                mSeparateNotification = newVal;
-                // manually hiding the preference because being unavailable does not do the job
-                if (mPreference != null) {
-                    mPreference.setVisible(getAvailabilityStatus() == AVAILABLE);
-                }
-            }
-        }
-    }
-
-
     @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
     @Override
     public void onResume() {
         super.onResume();
         mReceiver.register(true);
-        DeviceConfig.addOnPropertiesChangedListener(DeviceConfig.NAMESPACE_SYSTEMUI,
-                ActivityThread.currentApplication().getMainExecutor(),
-                this::onDeviceConfigChange);
+        mContext.getContentResolver().registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.VOLUME_LINK_NOTIFICATION),
+                false, mSettingObserver);
     }
 
     @OnLifecycleEvent(Lifecycle.Event.ON_PAUSE)
@@ -138,13 +134,12 @@ public class NotificationVolumePreferenceController extends VolumeSeekBarPrefere
     public void onPause() {
         super.onPause();
         mReceiver.register(false);
-        DeviceConfig.removeOnPropertiesChangedListener(this::onDeviceConfigChange);
+        mContext.getContentResolver().unregisterContentObserver(mSettingObserver);
     }
 
     @Override
     public int getAvailabilityStatus() {
-        boolean separateNotification = DeviceConfig.getBoolean(DeviceConfig.NAMESPACE_SYSTEMUI,
-                SystemUiDeviceConfigFlags.VOLUME_SEPARATE_NOTIFICATION, false);
+        boolean separateNotification = !isNotificationStreamLinked();
 
         return mContext.getResources().getBoolean(R.bool.config_show_notification_volume)
                 && !mHelper.isSingleVolume()
